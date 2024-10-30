@@ -374,7 +374,8 @@ process SAMTOOLS_INDEX_BAM {
 process RNASEQ_CALL_VARIANTS {
 	tag "$sampleId"
 	label "mem_xlarge"
-
+	container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
+	publishDir params.out, mode: 'copy', overwrite: true
 	input:
 		path genome
 		path index
@@ -409,111 +410,25 @@ process RNASEQ_CALL_VARIANTS {
 	"""
 }
 
-// Variant Annotation with SnpEff
-process annotate_variants {
-    container "https://depot.galaxyproject.org/singularity/snpeff%3A5.0--hdfd78af_0"
-    publishDir params.out, mode: 'copy', overwrite: true
-
+process ANNOTATE_VARIANTS {
+    tag "$sampleId"
+    label "mem_large"
+    container "https://depot.galaxyproject.org/singularity/snpeff%3A5.0--hdfd78af_1"
+	publishDir params.out, mode: 'copy', overwrite: true
     input:
-        path vcf_file
+        tuple val(sampleId), path(vcf)
 
     output:
-        path "annotated_variants.vcf"
+        tuple val(sampleId), path("${sampleId}.annotated.vcf")
 
     script:
     """
-    # Replace 'GRCh38.99' with the reference genome version you're using
-    snpEff GRCh38.99 ${vcf_file} > annotated_variants.vcf
+    snpEff -Xmx16G -c /home/kothai/cq-git-sample/Praktikum/snpEff/snpEff.config -v GRCh38.86 ${vcf} > ${sampleId}.annotated.vcf
     """
 }
 
 
-/*
- * Process 6A: Post-process the VCF result  
- */
 
-process POST_PROCESS_VCF {
-	tag "$sampleId"
-	publishDir "$params.results/$sampleId" 
-
-	input:
-		tuple val(sampleId), path('final.vcf')
-		tuple path('filtered.recode.vcf.gz'), path('filtered.recode.vcf.gz.tbi')
-	output: 
-		tuple val(sampleId), path('final.vcf'), path('commonSNPs.diff.sites_in_files')
-  
-	script:
-	'''
-	grep -v '#' final.vcf | awk '$7~/PASS/' |perl -ne 'chomp($_); ($dp)=$_=~/DP\\=(\\d+)\\;/; if($dp>=8){print $_."\\n"};' > result.DP8.vcf
-  
-	vcftools --vcf result.DP8.vcf --gzdiff filtered.recode.vcf.gz  --diff-site --out commonSNPs
-	'''
-}
-
-/* 
- * Process 6B: Prepare variants file for allele specific expression (ASE) analysis
- */
-
-process PREPARE_VCF_FOR_ASE {
-	tag "$sampleId"
-	publishDir "$params.results/$sampleId" 
-
-	input: 
-		tuple val(sampleId), path('final.vcf'), path('commonSNPs.diff.sites_in_files')
-	output: 
-		tuple val(sampleId), path('known_snps.vcf.gz'), path('known_snps.vcf.gz.tbi')
-		path 'AF.histogram.pdf'
-
-	script:
-	'''
-	awk 'BEGIN{OFS="\t"} $4~/B/{print $1,$2,$3}' commonSNPs.diff.sites_in_files  > test.bed
-    
-	vcftools --vcf final.vcf --bed test.bed --recode --keep-INFO-all --stdout > known_snps.vcf
-
-	grep -v '#'  known_snps.vcf | awk -F '\\t' '{print $10}' \
-               |awk -F ':' '{print $2}'|perl -ne 'chomp($_); \
-               @v=split(/\\,/,$_); if($v[0]!=0 ||$v[1] !=0)\
-               {print  $v[1]/($v[1]+$v[0])."\\n"; }' |awk '$1!=1' \
-               >AF.4R
-
-	gghist.R -i AF.4R -o AF.histogram.pdf
-	# Known SNPs have to be zipped and indexed for being used
-	bgzip -c known_snps.vcf  > known_snps.vcf.gz
-	tabix -p vcf known_snps.vcf.gz
-	'''
-}
-
-/* 
- * Process 6C: Allele-Specific Expression analysis with GATK ASEReadCounter.
- *             Calculates allele counts at a set of positions after applying 
- *             filters that are tuned for enabling allele-specific expression 
- *             (ASE) analysis
- */
-
-process ASE_KNOWNSNPS {
-	tag "$sampleId"
-	publishDir "$params.results/$sampleId" 
-	label "mem_large"
-
-	input:
-		path genome
-		path index
-		path dict
-		tuple val(sampleId), path(vcf), path(tbi), path(bam), path(bai)
-  
-	output:
-		path "ASE.tsv"
-  
-	script:
-	def bam_params = bam.collect{ "-I $it" }.join(' ')
-	"""
-	gatk ASEReadCounter \
-          -R ${genome} \
-          -O ASE.tsv \
-          ${bam_params} \
-          -V ${vcf}
-	"""
-}
 
 	
 // Workflow definition
@@ -577,28 +492,15 @@ workflow {
 	 // Indexing the recalibrated BAM file
     indexed_bam = SAMTOOLS_INDEX_BAM(recalibrated_bam)
 
-      // PART 5: GATK Variant Calling
-      //RNASEQ_CALL_VARIANTS( 
-            //params.genome, 
-            //PREPARE_GENOME_SAMTOOLS.out, 
-            //PREPARE_GENOME_PICARD.out, 
-           // RNASEQ_GATK_RECALIBRATE.out.groupTuple() )
+       //PART 5: GATK Variant Calling
+      vcf_output = RNASEQ_CALL_VARIANTS( 
+            params.genome, 
+            PREPARE_GENOME_SAMTOOLS.out, 
+            PREPARE_GENOME_PICARD.out, 
+            indexed_BAM )
+			
+		annotated_vcf = ANNOTATE_VARIANTS(vcf_output)
 
-      // PART 6: Post-process variants file and prepare for 
-      // Allele-Specific Expression and RNA Editing Analysis
-      //POST_PROCESS_VCF( 
-            //RNASEQ_CALL_VARIANTS.out, 
-            //PREPARE_VCF_FILE.out )
-
-      //PREPARE_VCF_FOR_ASE( POST_PROCESS_VCF.out )
-
-      //ASE_KNOWNSNPS(
-            //params.genome, 
-            //PREPARE_GENOME_SAMTOOLS.out, 
-            //PREPARE_GENOME_PICARD.out, 
-            //group_per_sample(
-                  //RNASEQ_GATK_RECALIBRATE.out, 
-                  //PREPARE_VCF_FOR_ASE.out[0]) )
 }
 
 
