@@ -29,9 +29,9 @@ params.variants = "$launchDir/data/known_variants.vcf.gz"
 params.denylist   = "$launchDir/data/denylist.bed"
 params.results = "results"
 //params.transcriptome_file = "$launchDir/data/ggal/transcriptome.fa"
-params.accession = "SRR062634"
-params.with_fastqc = false
-params.with_fastp = false
+params.accession = ""
+params.with_fastqc = true
+params.with_fastp = true
 params.cache = "${launchDir}/cache"
 params.out = "${launchDir}/out"
 params.reads = "$baseDir/data/reads/rep1_{1,2}.fq.gz"
@@ -67,15 +67,18 @@ process fastp {
 	publishDir params.out, mode: 'copy', overwrite: true
 	container "https://depot.galaxyproject.org/singularity/fastp%3A0.23.4--hadf994f_3"
 	input:
-		path fastq_files
+		tuple val(sampleId), path(reads) 
 	output:
-		path "trimmed_*.fastq.gz"
+		tuple val(sampleId), path("trimmed_*.fastq.gz")
 	
 	script:
 	"""
+	echo "Processing sample ID: ${sampleId}"
+    echo "Input FASTQ files: ${reads[0]} and ${reads[1]}"
+	
 	mkdir -p ${params.out}/fastp
-	fastp --in1 ${fastq_files[0]} --in2 ${fastq_files[1]} --out1 trimmed_1.fastq.gz --out2 trimmed_2.fastq.gz \\
-			--html ${params.out}/fastp/fastp_report.html --json ${params.out}/fastp/fastp_report.json
+    fastp --in1 ${reads[0]} --in2 ${reads[1]} --out1 trimmed_1.fastq.gz --out2 trimmed_2.fastq.gz \
+          --html ${params.out}/fastp/fastp_report_${sampleId}.html --json ${params.out}/fastp/fastp_report_${sampleId}.json
 	"""
 }
 
@@ -84,13 +87,15 @@ process fastqc_trimmed {
 	publishDir params.out, mode: "copy", overwrite: true
 	container "https://depot.galaxyproject.org/singularity/fastqc%3A0.12.1--hdfd78af_0"
 	input:
-        path trimmed_fastq_files
+        tuple val(sampleId), path(trimmed_fastq_files)
     
     output:
-        path "*"  // FastQC output for reports
+        tuple val(sampleId), path("*_fastqc.zip"), path("*_fastqc.html") 
     
     script:
     """
+	echo "Running FastQC on sample ID: ${sampleId}"
+    echo "Trimmed FASTQ files: ${trimmed_fastq_files[0]} and ${trimmed_fastq_files[1]}"
 
 	fastqc ${trimmed_fastq_files[0]} ${trimmed_fastq_files[1]} 
 	"""
@@ -99,8 +104,8 @@ process fastqc_trimmed {
 
 process PREPARE_GENOME_SAMTOOLS {
 	container "https://depot.galaxyproject.org/singularity/samtools%3A0.1.18--h50ea8bc_13"
-	publishDir params.out, mode: 'copy', overwrite: true
-	storeDir params.cache
+	publishDir "data", mode: 'copy', overwrite: true
+	
 	input:
 		path genome
 	output:
@@ -114,8 +119,8 @@ process PREPARE_GENOME_SAMTOOLS {
 
 process PREPARE_GENOME_PICARD {
 	container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
-	publishDir params.out, mode: 'copy', overwrite: true
-	storeDir params.cache
+	publishDir "data", mode: 'copy', overwrite: true
+	
 	input:
 		path genome
 	output:
@@ -123,7 +128,12 @@ process PREPARE_GENOME_PICARD {
 
 	script:
 	"""
-	gatk CreateSequenceDictionary -R $genome -O ${genome.baseName}.dict
+	gatk CreateSequenceDictionary \
+		-R $genome \
+		-O ${genome.baseName}.dict 
+    
+	# Correct any UR:file path in the resulting genome.dict file to absolute path
+    sed -i 's|UR:file:.*|UR:file:/home/kothai/cq-git-sample/Praktikum/data/genome.fa|' ${genome.baseName}.dict
 	"""
 }
 
@@ -132,7 +142,7 @@ process PREPARE_GENOME_PICARD {
 process PREPARE_STAR_GENOME_INDEX {
 	container "https://depot.galaxyproject.org/singularity/star%3A2.7.10b--h6b7c446_1"
 	publishDir params.out, mode: 'copy', overwrite: true
-	storeDir params.cache
+	
 	tag "$genome.baseName"
 	input:
 		path genome
@@ -154,7 +164,7 @@ process PREPARE_STAR_GENOME_INDEX {
 process PREPARE_VCF_FILE {
     container "https://depot.galaxyproject.org/singularity/mulled-v2-b9358559e3ae3b9d7d8dbf1f401ae1fcaf757de3%3Aac05763cf181a5070c2fdb9bb5461f8d08f7b93b-0"
      publishDir params.out, mode: 'copy', overwrite: true
-	 storeDir params.cache
+	 
     input: 
 		path variantsFile
 		path denylisted
@@ -351,12 +361,12 @@ process SAMTOOLS_INDEX_BAM {
         tuple val(replicateId), path(bam)
 
     output:
-        tuple val(replicateId), path("${bam.baseName}.bai")
+        tuple val(replicateId), path("${bam.baseName}.bam"), path("${bam.baseName}.bam.bai")
 
     script:
     """
     if [ -f $bam ]; then
-        samtools index -b $bam ${bam.baseName}.bai
+        samtools index -b $bam ${bam.baseName}.bam.bai
     else
         echo "Error: BAM file not found" >&2
         exit 1
@@ -372,43 +382,52 @@ process SAMTOOLS_INDEX_BAM {
  */
 
 process RNASEQ_CALL_VARIANTS {
-	tag "$sampleId"
-	label "mem_xlarge"
-	container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
-	publishDir params.out, mode: 'copy', overwrite: true
-	input:
-		path genome
-		path index
-		path dict
-		tuple val(sampleId), path(bam), path(bai)
- 
-	output: 
-		tuple val(sampleId), path('final.vcf')
+	
+    tag "$sampleId"
+    label "mem_xlarge"
+    container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
+    publishDir params.out, mode: 'copy', overwrite: true
 
-	script:
-	def bam_params = bam.collect{ "-I $it" }.join(' ')
-	"""
-	# fix absolute path in dict file
-	sed -i 's@UR:file:.*${genome}@UR:file:${genome}@g' $dict
-  
-	# Variant calling
-	gatk HaplotypeCaller \
-          --native-pair-hmm-threads ${task.cpus} \
-          --reference ${genome} \
-          --output output.gatk.vcf.gz \
-          ${bam_params} \
-          --standard-min-confidence-threshold-for-calling 20.0 \
-          --dont-use-soft-clipped-bases 
+    input:
+        path genome         // Path to the genome reference (e.g., genome.fa)
+        path genome_fai     // Path to the .fai index file for the genome
+        path genome_dict    // Path to the genome dictionary file (e.g., genome.dict)
+        tuple val(sampleId), path(bam)
 
-	# Variant filtering
-	gatk VariantFiltration \
-          -R ${genome} -V output.gatk.vcf.gz \
-          --cluster-window-size 35 --cluster-size 3 \
-          --filter-name FS --filter-expression \"FS > 30.0\" \
-          --filter-name QD --filter-expression \"QD < 2.0\" \
-          -O final.vcf
-	"""
+    output:
+        tuple val(sampleId), path("final_${sampleId}.vcf")
+
+    script:
+    """
+	
+	# Print paths for debugging
+    echo "Genome: ${genome}"
+    echo "BAM file: ${bam}"
+    echo "Output: output_${sampleId}.vcf.gz"
+	
+	
+    # Adjust genome dictionary path to absolute if necessary
+    sed -i 's|UR:file:.*|UR:file:/home/kothai/cq-git-sample/Praktikum/data/genome.fa|' ${genome_dict}
+
+    # Variant calling with HaplotypeCaller
+    gatk HaplotypeCaller \
+        --native-pair-hmm-threads ${task.cpus} \
+        --reference ${genome} \
+        --output output_${sampleId}.vcf.gz \
+        -I ${bam} \
+        --standard-min-confidence-threshold-for-calling 20.0 \
+        --dont-use-soft-clipped-bases
+
+    # Variant filtering with VariantFiltration
+    gatk VariantFiltration \
+        -R ${genome} -V output_${sampleId}.vcf.gz \
+        --cluster-window-size 35 --cluster-size 3 \
+        --filter-name FS --filter-expression "FS > 30.0" \
+        --filter-name QD --filter-expression "QD < 2.0" \
+        -O final_${sampleId}.vcf
+    """
 }
+
 
 process ANNOTATE_VARIANTS {
     tag "$sampleId"
@@ -433,75 +452,51 @@ process ANNOTATE_VARIANTS {
 	
 // Workflow definition
 workflow {
-    // Step 1: Prefetch SRA file and convert to FASTQ format
-    accession_channel = Channel.from(params.accession)
-    sra_channel = prefetch(accession_channel)
-    reads_channel = fasterqdump(sra_channel)
-
-    // Optional Step 2: Trimming using Fastp (only if params.with_fastp is true)
-    fastp_result = reads_channel
-    if (params.with_fastp) {
-        fastp_result = fastp(reads_channel)
+    // Step 1: Define reads_channel based on whether params.accession is provided
+    def reads_channel
+    if (params.accession) {
+        // Use prefetch and fasterqdump if accession is provided
+        def accession_channel = Channel.value(params.accession)
+        def sra_channel = prefetch(accession_channel)
+        reads_channel = fasterqdump(sra_channel)
+    } else {
+        // Directly use params.reads if no accession is provided
+        reads_channel = Channel.fromFilePairs(params.reads, checkIfExists: true)
     }
 
-    // Optional Step 3: Run FastQC on trimmed reads (only if params.with_fastqc is true)
+    // Step 2: Pass reads_channel to fastp
+    def trimmed_reads = fastp(reads_channel)
+    
+    // Step 3: Optionally pass trimmed reads to FastQC if enabled
     if (params.with_fastqc) {
-        fastqc_trimmed(fastp_result)
+        fastqc_trimmed(trimmed_reads)
     }
 
-    reads_ch = Channel.fromFilePairs(params.reads)
+    // Part 1: Data Preparation - Prepare genome indices and filtered VCF
+    def genome_index_samtools = PREPARE_GENOME_SAMTOOLS(params.genome)
+    def genome_dict = PREPARE_GENOME_PICARD(params.genome)
+    def star_genome_dir = PREPARE_STAR_GENOME_INDEX(params.genome)
+    def filtered_vcf = PREPARE_VCF_FILE(params.variants, params.denylist)
 
-      // PART 1: Data preparation
-      genome_index_samtools = PREPARE_GENOME_SAMTOOLS(params.genome)
-      genome_dict = PREPARE_GENOME_PICARD(params.genome)
-      star_genome_dir = PREPARE_STAR_GENOME_INDEX(params.genome)
-      filtered_vcf = PREPARE_VCF_FILE(params.variants, params.denylist)
-	  
-	  
-	  replicate_id_ch = Channel.value("rep1")
+    // Part 2: STAR RNA-Seq Mapping
+    def aligned_bam = RNASEQ_MAPPING_STAR(star_genome_dir, trimmed_reads)
 
-      // PART 2: STAR RNA-Seq Mapping
-     aligned_bam = RNASEQ_MAPPING_STAR(  
-            star_genome_dir, 
-            reads_ch )
-	
-	 // Run Samtools filtering and indexing
-     indexed_BAM = SAMTOOLS_FILTER_INDEX(aligned_bam)
-	 
-	 
-	 
-	 // Add read group information
-    bam_with_rg = ADD_READ_GROUP(indexed_BAM)
+    // Part 3: Process mapped reads with Samtools, add read group, and SplitNCigar
+    def filtered_bam = SAMTOOLS_FILTER_INDEX(aligned_bam)
+    def bam_with_rg = ADD_READ_GROUP(filtered_bam)
+    def split_bam_output = RNASEQ_GATK_SPLITNCIGAR(params.genome, genome_index_samtools, genome_dict, bam_with_rg)
+    def indexed_split_bam = SAMTOOLS_INDEX_SPLIT_BAM(split_bam_output)
 
-      // PART 3: GATK Prepare Mapped Reads
-      split_bam_output = RNASEQ_GATK_SPLITNCIGAR(
-            params.genome, 
-            PREPARE_GENOME_SAMTOOLS.out, 
-            PREPARE_GENOME_PICARD.out, 
-            bam_with_rg)
-	 indexed_split_bam = SAMTOOLS_INDEX_SPLIT_BAM(split_bam_output)
-	
-	
-      // PART 4: GATK Base Quality Score Recalibration Workflow
-      recalibrated_bam = RNASEQ_GATK_RECALIBRATE(
-                  params.genome, 
-                  PREPARE_GENOME_SAMTOOLS.out, 
-                  PREPARE_GENOME_PICARD.out, 
-                  indexed_split_bam, 
-                  PREPARE_VCF_FILE.out)
-	 // Indexing the recalibrated BAM file
-    indexed_bam = SAMTOOLS_INDEX_BAM(recalibrated_bam)
+    // Part 4: Base Recalibration and Indexing
+    def recalibrated_bam = RNASEQ_GATK_RECALIBRATE(params.genome, genome_index_samtools, genome_dict, indexed_split_bam, filtered_vcf)
+    def indexed_bam_final = SAMTOOLS_INDEX_BAM(recalibrated_bam)
 
-       //PART 5: GATK Variant Calling
-      vcf_output = RNASEQ_CALL_VARIANTS( 
-            params.genome, 
-            PREPARE_GENOME_SAMTOOLS.out, 
-            PREPARE_GENOME_PICARD.out, 
-            indexed_BAM )
-			
-		annotated_vcf = ANNOTATE_VARIANTS(vcf_output)
-
+    // Part 5: Variant Calling and Annotation
+    def vcf_output = RNASEQ_CALL_VARIANTS(params.genome, genome_index_samtools, genome_dict, indexed_bam_final)
+    def annotated_vcf = ANNOTATE_VARIANTS(vcf_output)
 }
+
+
 
 
 
