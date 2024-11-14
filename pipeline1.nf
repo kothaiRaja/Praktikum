@@ -1,137 +1,146 @@
 nextflow.enable.dsl = 2
-//ALL INPUT DATA 
-//1.REFERENCE GENOME ASSEMBLY(.FA)
-//2.RNA SEQ READS(FASTAQ.GZ)
-//3. KNOWN VARIANTS(VCF.GZ)
-//4.BLACKLISTED REGIONS (.BED)
-//LOT OF INTERMEDIATE FILES AND OUTPUTS
-
-//MAIN AIM OF THIS PIPELINE IS TO PROCESS THE RAW RNA-SEQ DATA AND OBTAIN THE LIST OF SMALL VARIANTS FOR DOWNSTREAM ANALYSIS. 
-//PIPELINE INCLUDES SNVS POSTPROCESSING AND QUANTIFICATION FOR ALLELE SPECIFIC EXPRESSION. 
-
-//FIRST STEP IS TO PREPARE THE GENOME
-//GENOME INDICES WITH SAMTOOLS AND PICARD IS DONE FIRST. THEW WILL BE NEEDED FOR GATK COMMANDS SUCH AS SPLITNTRIM
-//GENOME INDEX FOR STAR IS CREATED NEXTFLOW
-//VARIANT OVERLAPPING BLACKLISTED REGIONS ARE FILTERED THEN TO REDUCE FALSE POSITIVE CALLS
-
-//MAPPING (2-PASS APPROACH). FIRST ALIGNMENT CREATES TABLE WITH SPLICE JUNCTIONS THAT IS USED TO GUIDE FINAL ALIGNMENT. 
-//BAM FILES - CREATE INDEX. 
-
-//BASE RECALLIBRATION
-//VARIANT CALLING AND VARIANT FILTERING
-//VARIANT POST PROCESSING. 
 
 
-//STEP1: 
-// DEFINING ALL THE PARAMETERS
-params.genome = "$launchDir/data/genome.fa"
-params.variants = "$launchDir/data/known_variants.vcf.gz"
-params.denylist   = "$launchDir/data/denylist.bed"
-params.results = "results"
-//params.transcriptome_file = "$launchDir/data/ggal/transcriptome.fa"
-params.accession = ""
-params.with_fastqc = true
-params.with_fastp = true
-params.cache = "${launchDir}/cache"
-params.out = "${launchDir}/out"
+// Define all parameters
 params.reads = "$baseDir/data/reads/rep1_{1,2}.fq.gz"
+params.genome = "$launchDir/data/genome.fa"
+params.variants = "$launchDir/data/subset_fixed.vcf.gz"
+params.denylist = "$launchDir/data/denylist.bed"
+params.accession = ""
+params.out = "$baseDir/output"
+
+// Output Directory
+params.outdir = "$baseDir/output"
+
+
 
 process prefetch {
-  container "https://depot.galaxyproject.org/singularity/sra-tools%3A2.11.0--pl5321ha49a11a_3"
-  storeDir params.cache
-  input:
+    container "https://depot.galaxyproject.org/singularity/sra-tools%3A2.11.0--pl5321ha49a11a_3"
+    publishDir params.cache_dir, mode: "copy"
+
+    input:
     val accession
-  output:
-    path "${accession}"
-  """
-  prefetch ${accession}
-  """
-}
 
-process fasterqdump {
-  container "https://depot.galaxyproject.org/singularity/sra-tools%3A2.11.0--pl5321ha49a11a_3"
-  storeDir params.cache
-  input:
-    path sradir
-  output:
-    path "${sradir}_*.fastq"
-  """
-  fasterq-dump --split-files ${sradir} 
-  """
-} 
-
-
-// Step 3: Run Fastp (Trimming)
-process fastp {
-	storeDir params.cache
-	publishDir params.out, mode: 'copy', overwrite: true
-	container "https://depot.galaxyproject.org/singularity/fastp%3A0.23.4--hadf994f_3"
-	input:
-		tuple val(sampleId), path(reads) 
-	output:
-		tuple val(sampleId), path("trimmed_*.fastq.gz")
-	
-	script:
-	"""
-	echo "Processing sample ID: ${sampleId}"
-    echo "Input FASTQ files: ${reads[0]} and ${reads[1]}"
-	
-	mkdir -p ${params.out}/fastp
-    fastp --in1 ${reads[0]} --in2 ${reads[1]} --out1 trimmed_1.fastq.gz --out2 trimmed_2.fastq.gz \
-          --html ${params.out}/fastp/fastp_report_${sampleId}.html --json ${params.out}/fastp/fastp_report_${sampleId}.json
-	"""
-}
-
-// Step 5: Run FastQC on trimmed reads
-process fastqc_trimmed {
-	publishDir params.out, mode: "copy", overwrite: true
-	container "https://depot.galaxyproject.org/singularity/fastqc%3A0.12.1--hdfd78af_0"
-	input:
-        tuple val(sampleId), path(trimmed_fastq_files)
-    
     output:
-        tuple val(sampleId), path("*_fastqc.zip"), path("*_fastqc.html") 
-    
+    path "${accession}"
+
     script:
     """
-	echo "Running FastQC on sample ID: ${sampleId}"
-    echo "Trimmed FASTQ files: ${trimmed_fastq_files[0]} and ${trimmed_fastq_files[1]}"
-
-	fastqc ${trimmed_fastq_files[0]} ${trimmed_fastq_files[1]} 
-	"""
+    prefetch ${accession}
+    """
 }
+
+
+process fasterqdump {
+    container "https://depot.galaxyproject.org/singularity/sra-tools%3A2.11.0--pl5321ha49a11a_3"
+    publishDir params.cache_dir, mode: "copy"
+
+    input:
+    path sradir
+
+    output:
+    path "${sradir}_*.fastq"
+
+    script:
+    """
+    fasterq-dump --split-files ${sradir}
+    """
+}
+
+
+process fastqc_raw {
+    tag "${sample_id}"
+	container "https://depot.galaxyproject.org/singularity/fastqc%3A0.12.1--hdfd78af_0"
+    publishDir "${params.outdir}/fastqc/raw", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    path("*.zip"), emit: fastqc_zip
+    path("*.html"), emit: fastqc_html
+
+    script:
+    """
+    fastqc --outdir . ${reads.join(' ')}
+    """
+}
+// Fastp Process
+process fastp {
+    tag "${sample_id}"
+	container "https://depot.galaxyproject.org/singularity/fastp%3A0.23.4--hadf994f_3"
+    publishDir "${params.outdir}/fastp", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_R1_trimmed.fastq.gz"), path("${sample_id}_R2_trimmed.fastq.gz"), emit: trimmed_reads
+    tuple val(sample_id), path("${sample_id}_fastp.html"), path("${sample_id}_fastp.json"), emit: fastp_reports
+
+    script:
+    """
+    fastp \
+        -i ${reads[0]} -I ${reads[1]} \
+        -o ${sample_id}_R1_trimmed.fastq.gz \
+        -O ${sample_id}_R2_trimmed.fastq.gz \
+		--thread ${task.cpus} \
+        --html ${sample_id}_fastp.html \
+        --json ${sample_id}_fastp.json
+    """
+}
+process fastqc_trimmed {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/fastqc/trimmed", mode: 'copy'
+	container "https://depot.galaxyproject.org/singularity/fastqc%3A0.12.1--hdfd78af_0"
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path("*.zip"), path("*.html")
+
+    script:
+    """
+    fastqc --outdir . ${reads.join(' ')}
+    """
+}
+
+
+
 //Create a fasta Genome Index
 
 process PREPARE_GENOME_SAMTOOLS {
-	container "https://depot.galaxyproject.org/singularity/samtools%3A0.1.18--h50ea8bc_13"
-	publishDir "data", mode: 'copy', overwrite: true
-	
-	input:
-		path genome
-	output:
-		path "${genome}.fai"
-	script:
-	"""
-	samtools faidx ${genome}
-	"""
+    container "https://depot.galaxyproject.org/singularity/samtools%3A1.18--h50ea8bc_1"
+    publishDir "${params.outdir}/genome/index", mode: "copy"
+
+    input:
+    path genome
+
+    output:
+    path "${genome}.fai"
+
+    script:
+    """
+    samtools faidx ${genome}
+    """
 }
+
 //Create genome dictionary with PICARD for GATK4
 
 process PREPARE_GENOME_PICARD {
-	container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
-	publishDir "data", mode: 'copy', overwrite: true
-	
-	input:
-		path genome
-	output:
-		path "${genome.baseName}.dict"
+    container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
+    publishDir "${params.outdir}/genome/dict", mode: "copy"
 
-	script:
-	"""
-	gatk CreateSequenceDictionary \
-		-R $genome \
-		-O ${genome.baseName}.dict 
-    
+    input:
+    path genome
+
+    output:
+    path "${genome.baseName}.dict"
+
+    script:
+    """
+    gatk CreateSequenceDictionary -R $genome -O ${genome.baseName}.dict
+   
 	# Correct any UR:file path in the resulting genome.dict file to absolute path
     sed -i 's|UR:file:.*|UR:file:/home/kothai/cq-git-sample/Praktikum/data/genome.fa|' ${genome.baseName}.dict
 	"""
@@ -140,64 +149,63 @@ process PREPARE_GENOME_PICARD {
 //Create a genome Index file
 
 process PREPARE_STAR_GENOME_INDEX {
-	container "https://depot.galaxyproject.org/singularity/star%3A2.7.10b--h6b7c446_1"
-	publishDir params.out, mode: 'copy', overwrite: true
-	
-	tag "$genome.baseName"
-	input:
-		path genome
-	output:
-		path "genome_dir"
-	script:
-	"""
-	mkdir genome_dir 
-	
-	STAR --runMode genomeGenerate \
-		 --genomeDir genome_dir \
-		 --genomeFastaFiles ${genome} \
-		 --runThreadN ${task.cpus}
-	"""
+    container "https://depot.galaxyproject.org/singularity/star%3A2.7.10b--h6b7c446_1"
+    publishDir "${params.outdir}/genome/starindex", mode: "copy"
+
+    input:
+    path genome
+
+    output:
+    path "genome_index" 
+
+    script:
+    """
+    STAR --runThreadN ${task.cpus} \
+         --runMode genomeGenerate \
+         --genomeDir genome_index \
+         --genomeFastaFiles ${genome} \
+         --genomeSAindexNbases 11
+    """
 }
+
+
 
 //Filtered and recorded variants
 
 process PREPARE_VCF_FILE {
-    container "https://depot.galaxyproject.org/singularity/mulled-v2-b9358559e3ae3b9d7d8dbf1f401ae1fcaf757de3%3Aac05763cf181a5070c2fdb9bb5461f8d08f7b93b-0"
-     publishDir params.out, mode: 'copy', overwrite: true
+    container "https://depot.galaxyproject.org/singularity/bcftools%3A1.15.1--h0ea216a_0"
+    publishDir "${params.outdir}/genome/vcf", mode: "copy"
 	 
     input: 
-		path variantsFile
-		path denylisted
+        path variantsFile
+        path denylisted
 
-	output:
-    tuple \
-      path("${variantsFile.baseName}.filtered.recode.vcf.gz"), \
-      path("${variantsFile.baseName}.filtered.recode.vcf.gz.tbi")
+    output:
+        tuple path("${variantsFile.baseName}.filtered.recode.vcf.gz"),
+              path("${variantsFile.baseName}.filtered.recode.vcf.gz.tbi")
   
-	script:  
-	"""
-	vcftools --gzvcf $variantsFile -c \
-           --exclude-bed ${denylisted} \
-           --recode | bgzip -c \
-           > ${variantsFile.baseName}.filtered.recode.vcf.gz
+    script:  
+    """
+    # Exclude regions from the blacklist using bcftools
+    bcftools view -T ^${denylisted} ${variantsFile} -Oz -o ${variantsFile.baseName}.filtered.recode.vcf.gz
 
-	tabix ${variantsFile.baseName}.filtered.recode.vcf.gz
-	"""
+    # Index the filtered VCF
+    tabix -p vcf ${variantsFile.baseName}.filtered.recode.vcf.gz
+    """
 }
+
+
 
 process RNASEQ_MAPPING_STAR {
     container "https://depot.galaxyproject.org/singularity/star%3A2.7.11a--h0033a41_0"
-    
-    publishDir params.out, mode: 'copy', overwrite: true
-	
-	tag "$replicateId"
+    publishDir "${params.outdir}/star", mode: "copy"
 
-	input: 
-        path genomeDir
-        tuple val(replicateId), path(reads)
+    input:
+    path genomeDir
+    tuple val(replicateId), path(reads)
 
     output:
-        tuple val(replicateId), path("Aligned.*.sortedByCoord.out.bam")
+    tuple val(replicateId), path("Aligned.*.sortedByCoord.out.bam")
 
 
     script:
@@ -217,17 +225,33 @@ process RNASEQ_MAPPING_STAR {
     """
 }
 
-
-process SAMTOOLS_FILTER_INDEX {
-    container "https://depot.galaxyproject.org/singularity/samtools%3A0.1.18--h50ea8bc_13"
-    
+process SAMTOOLS_FLAGSTAT {
+    container "https://depot.galaxyproject.org/singularity/samtools%3A1.18--hd87286a_0"
+    publishDir "${params.outdir}/flagstat", mode: "copy"
 
     input:
-        tuple val(replicateId), path(bam)
+    tuple val(replicateId), path(bam)
 
     output:
-		 tuple val(replicateId), path("${bam.baseName}.uniq.bam"), path("${bam.baseName}.uniq.bam.bai")
+    path "${replicateId}_flagstat.txt"
 
+    script:
+    """
+    samtools flagstat ${bam} > ${replicateId}_flagstat.txt
+    """
+}
+
+
+process SAMTOOLS_FILTER_INDEX {
+    container "https://depot.galaxyproject.org/singularity/samtools%3A1.18--hd87286a_0"
+    publishDir "${params.outdir}/star/index", mode: "copy"
+
+    input:
+    tuple val(replicateId), path(bam)
+
+    output:
+    tuple val(replicateId), path("${bam.baseName}.uniq.bam"), path("${bam.baseName}.uniq.bam.bai")
+	
     script:
     """
     # Filter for unique alignments and create a new BAM file
@@ -240,7 +264,8 @@ process SAMTOOLS_FILTER_INDEX {
 }
 
 process ADD_READ_GROUP {
-    container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
+    container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
+    publishDir "${params.outdir}/star/RG", mode: "copy"
 
     input:
     tuple val(replicateId), path(bamFile), path(baiFile) 
@@ -261,6 +286,8 @@ process ADD_READ_GROUP {
     """
 }
 
+
+
 /*
  * Process 3: Split reads that contain Ns in their CIGAR string.
  *            Creates k+1 new reads (where k is the number of N cigar elements) 
@@ -269,38 +296,35 @@ process ADD_READ_GROUP {
  */
 
 process RNASEQ_GATK_SPLITNCIGAR {
-	tag "$replicateId"
-	label 'mem_large'
-	
-    publishDir params.out, mode: 'copy', overwrite: true
-	container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
-	input: 
-		path genome
-		path index
-		path genome_dict
-		tuple val(replicateId), path(bam)
+    tag "$replicateId"
+    label 'mem_large'
+    container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
+    publishDir "${params.outdir}/SNG", mode: 'copy'
 
+    input:
+    path genome
+    path index
+    path genome_dict
+    tuple val(replicateId), path(bam)
 
-	output:
-		tuple val(replicateId), path('split.bam')
-  
-	script:
-	"""
-	# SplitNCigarReads and reassign mapping qualities
-	gatk SplitNCigarReads \
-            -R $genome \
-            -I $bam \
-            --refactor-cigar-string \
-			-O split.bam
-			
-	
-	"""
+    output:
+    tuple val(replicateId), path('split.bam')
+
+    script:
+    """
+    gatk SplitNCigarReads \
+        -R $genome \
+        -I $bam \
+        --refactor-cigar-string \
+        -O split.bam
+    """
 }
+
 
 // Process to run samtools indexing
 process SAMTOOLS_INDEX_SPLIT_BAM {
     container "https://depot.galaxyproject.org/singularity/samtools%3A0.1.18--h50ea8bc_13"
-    publishDir params.out, mode: 'copy', overwrite: true
+    publishDir "${params.outdir}/SNG/splitbam", mode: 'copy'
 
     input:
     tuple val(replicateId), path(bam)
@@ -324,44 +348,46 @@ process RNASEQ_GATK_RECALIBRATE {
     tag "$replicateId"
     label "mem_large"
     container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
-    publishDir params.out, mode: 'copy', overwrite: true
-    input: 
-        path genome
-        path index
-        path dict
-        tuple val(replicateId), path(bam), path(bai)
-        tuple path(variants_file), path(variants_file_index)
+    publishDir "${params.outdir}/recalibrate", mode: 'copy'
+
+    input:
+    path genome
+    path index
+    path dict
+    tuple val(replicateId), path(bam), path(bai)
+    tuple path(variants_file), path(variants_file_index)
 
     output:
-        tuple val(replicateId), path("${replicateId}.final.uniq.bam")
+    tuple val(replicateId), path("${replicateId}.final.uniq.bam")
 
     script:
     """
-    # Indel Realignment and Base Recalibration
     gatk BaseRecalibrator \
-          -R $genome \
-          -I $bam \
-          --known-sites $variants_file \
-          -O final.rnaseq.grp \
-          --java-options "-DGATK_STACKTRACE_ON_USER_EXCEPTION=true"
+        -R $genome \
+        -I $bam \
+        --known-sites $variants_file \
+        -O final.rnaseq.grp \
+        --java-options "-DGATK_STACKTRACE_ON_USER_EXCEPTION=true"
 
     gatk ApplyBQSR \
-          -R $genome -I $bam \
-          --bqsr-recal-file final.rnaseq.grp \
-          -O ${replicateId}.final.uniq.bam \
-          --java-options "-DGATK_STACKTRACE_ON_USER_EXCEPTION=true"
+        -R $genome \
+        -I $bam \
+        --bqsr-recal-file final.rnaseq.grp \
+        -O ${replicateId}.final.uniq.bam \
+        --java-options "-DGATK_STACKTRACE_ON_USER_EXCEPTION=true"
     """
 }
+
 process SAMTOOLS_INDEX_BAM {
     tag "$replicateId"
     container "https://depot.galaxyproject.org/singularity/samtools%3A1.19.1--h50ea8bc_0"
-	publishDir params.out, mode: 'copy', overwrite: true
-	
+    publishDir "${params.outdir}/recalibrate/bam", mode: 'copy'
+
     input:
-        tuple val(replicateId), path(bam)
+    tuple val(replicateId), path(bam)
 
     output:
-        tuple val(replicateId), path("${bam.baseName}.bam"), path("${bam.baseName}.bam.bai")
+    tuple val(replicateId), path("${bam.baseName}.bam"), path("${bam.baseName}.bam.bai")
 
     script:
     """
@@ -382,17 +408,16 @@ process SAMTOOLS_INDEX_BAM {
  */
 
 process RNASEQ_CALL_VARIANTS {
-	
     tag "$sampleId"
     label "mem_xlarge"
-    container "/home/kothai/cq-git-sample/Praktikum/gatk4_4.2.6.0--hdfd78af_0.sif"
-    publishDir params.out, mode: 'copy', overwrite: true
+    container "https://depot.galaxyproject.org/singularity/gatk4%3A4.2.6.0--hdfd78af_0"
+    publishDir "${params.outdir}/variants", mode: 'copy'
 
     input:
         path genome         // Path to the genome reference (e.g., genome.fa)
         path genome_fai     // Path to the .fai index file for the genome
         path genome_dict    // Path to the genome dictionary file (e.g., genome.dict)
-        tuple val(sampleId), path(bam)
+        tuple val(sampleId), path(bam), path(bai)
 
     output:
         tuple val(sampleId), path("final_${sampleId}.vcf")
@@ -429,71 +454,98 @@ process RNASEQ_CALL_VARIANTS {
 }
 
 
+
 process ANNOTATE_VARIANTS {
     tag "$sampleId"
     label "mem_large"
-    container "https://depot.galaxyproject.org/singularity/snpeff%3A5.0--hdfd78af_1"
-	publishDir params.out, mode: 'copy', overwrite: true
+    container "https://depot.galaxyproject.org/singularity/snpeff%3A5.2--hdfd78af_1"
+    publishDir "${params.outdir}/annotations", mode: 'copy'
+
     input:
         tuple val(sampleId), path(vcf)
 
     output:
-        tuple val(sampleId), path("${sampleId}.annotated.vcf")
+        tuple val(sampleId), path("${sampleId}.annotated.vcf"), path("${sampleId}.summary.html")
 
     script:
     """
-    snpEff -Xmx16G -c /home/kothai/cq-git-sample/Praktikum/snpEff/snpEff.config -v GRCh38.86 ${vcf} > ${sampleId}.annotated.vcf
+    java -Xmx16G -jar /mnt/snpEff/snpEff.jar \\
+        -c ${params.snpeff_config} \\
+        -v ${params.snpeff_db} ${vcf} > ${sampleId}.annotated.vcf
+
+    java -Xmx16G -jar /mnt/snpEff/snpEff.jar \\
+        -c ${params.snpeff_config} \\
+        -v ${params.snpeff_db} ${vcf} -stats ${sampleId}.summary.html > /dev/null
     """
 }
 
 
 
+process multiqc {
+    tag "MultiQC"
+    publishDir "${params.outdir}/multiqc", mode: 'copy'
+	container "https://depot.galaxyproject.org/singularity/multiqc%3A1.24.1--pyhdfd78af_0"
+    input:
+    path results_dir
 
-	
-// Workflow definition
+    output:
+    path "multiqc_report.html"
+    path "multiqc_data"
+
+    script:
+    """
+    multiqc ${results_dir} --outdir .
+    """
+}
+
+
 workflow {
-    // Step 1: Define reads_channel based on whether params.accession is provided
-    def reads_channel
-    if (params.accession) {
-        // Use prefetch and fasterqdump if accession is provided
-        def accession_channel = Channel.value(params.accession)
-        def sra_channel = prefetch(accession_channel)
-        reads_channel = fasterqdump(sra_channel)
-    } else {
-        // Directly use params.reads if no accession is provided
-        reads_channel = Channel.fromFilePairs(params.reads, checkIfExists: true)
-    }
+    // Step 1: Create a channel for paired-end reads
+    reads_channel = Channel
+        .fromFilePairs(params.reads, checkIfExists: true)
+        .map { sample_id, reads -> tuple(sample_id, reads.sort()) }
 
-    // Step 2: Pass reads_channel to fastp
-    def trimmed_reads = fastp(reads_channel)
-    
-    // Step 3: Optionally pass trimmed reads to FastQC if enabled
-    if (params.with_fastqc) {
-        fastqc_trimmed(trimmed_reads)
-    }
+    // Step 2: Run FastQC on raw reads
+    fastqc_raw_results = fastqc_raw(reads_channel)
 
-    // Part 1: Data Preparation - Prepare genome indices and filtered VCF
+    // Step 3: Run Fastp for trimming
+    fastp_results = fastp(reads_channel)
+
+    // Step 4: Extract and regroup trimmed reads
+    fastp_trimmed_reads = fastp_results.trimmed_reads
+        .map { sample_id, r1, r2 -> tuple(sample_id, [r1, r2]) }
+
+    // Step 5: Run FastQC on trimmed reads
+    fastqc_trimmed_results = fastqc_trimmed(fastp_trimmed_reads)
+
+    // Step 6: Data Preparation - Prepare genome indices and filtered VCF
     def genome_index_samtools = PREPARE_GENOME_SAMTOOLS(params.genome)
     def genome_dict = PREPARE_GENOME_PICARD(params.genome)
     def star_genome_dir = PREPARE_STAR_GENOME_INDEX(params.genome)
     def filtered_vcf = PREPARE_VCF_FILE(params.variants, params.denylist)
 
-    // Part 2: STAR RNA-Seq Mapping
-    def aligned_bam = RNASEQ_MAPPING_STAR(star_genome_dir, trimmed_reads)
+    // Step 7: STAR RNA-Seq Mapping
+    star_aligned_bam = RNASEQ_MAPPING_STAR(star_genome_dir, fastp_trimmed_reads)
 
-    // Part 3: Process mapped reads with Samtools, add read group, and SplitNCigar
-    def filtered_bam = SAMTOOLS_FILTER_INDEX(aligned_bam)
-    def bam_with_rg = ADD_READ_GROUP(filtered_bam)
-    def split_bam_output = RNASEQ_GATK_SPLITNCIGAR(params.genome, genome_index_samtools, genome_dict, bam_with_rg)
-    def indexed_split_bam = SAMTOOLS_INDEX_SPLIT_BAM(split_bam_output)
+    // Step 8: Generate alignment statistics
+    alignment_stats = SAMTOOLS_FLAGSTAT(star_aligned_bam)
 
-    // Part 4: Base Recalibration and Indexing
-    def recalibrated_bam = RNASEQ_GATK_RECALIBRATE(params.genome, genome_index_samtools, genome_dict, indexed_split_bam, filtered_vcf)
-    def indexed_bam_final = SAMTOOLS_INDEX_BAM(recalibrated_bam)
+    // Step 9: Process mapped reads with Samtools, Add Read Group, and SplitNCigar
+    filtered_bam = SAMTOOLS_FILTER_INDEX(star_aligned_bam)
+    bam_with_rg = ADD_READ_GROUP(filtered_bam)
+    split_bam = RNASEQ_GATK_SPLITNCIGAR(params.genome, genome_index_samtools, genome_dict, bam_with_rg)
+    indexed_split_bam = SAMTOOLS_INDEX_SPLIT_BAM(split_bam)
 
-    // Part 5: Variant Calling and Annotation
-    def vcf_output = RNASEQ_CALL_VARIANTS(params.genome, genome_index_samtools, genome_dict, indexed_bam_final)
-    def annotated_vcf = ANNOTATE_VARIANTS(vcf_output)
+    // Step 10: Base Recalibration and Indexing
+    recalibrated_bam = RNASEQ_GATK_RECALIBRATE(params.genome, genome_index_samtools, genome_dict, indexed_split_bam, filtered_vcf)
+    indexed_final_bam = SAMTOOLS_INDEX_BAM(recalibrated_bam)
+
+    // Step 11: Variant Calling and Annotation
+    variant_vcf = RNASEQ_CALL_VARIANTS(params.genome, genome_index_samtools, genome_dict, indexed_final_bam)
+    annotated_vcf = ANNOTATE_VARIANTS(variant_vcf)
+
+    // Step 12: Run MultiQC to aggregate all results
+    multiqc_results = multiqc(Channel.fromPath("${params.outdir}"))
 }
 
 
